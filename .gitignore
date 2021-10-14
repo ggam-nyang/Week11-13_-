@@ -12,7 +12,7 @@
 # ignore all files in the build/ directory
 build
 
-tests
+
 
 # ignore doc/notes.txt, but not doc/server/arch.txt
 doc/*.txt
