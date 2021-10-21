@@ -13,14 +13,18 @@
 #include <stdio.h>
 #include <syscall-nr.h>
 #include "intrinsic.h"
+#ifdef VM
+#include "vm/vm.h"
+#endif
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
 
 /* Projects 2 and later. */
-void check_address(const uint64_t *);
+void *check_address(const uint64_t *);
+void check_valid_buffer(void *buffer, unsigned size, void *rsp, bool to_write);
 void halt (void) NO_RETURN;
-void exit (int status) NO_RETURN;
+int exit (int status) NO_RETURN;
 tid_t fork(const char *, struct intr_frame *);
 int exec (const char *file);
 int wait (pid_t);
@@ -75,21 +79,25 @@ syscall_init (void) {
 /* The main system call interface */
 void
 syscall_handler (struct intr_frame *f UNUSED) {
-	// TODO: Your implementation goes here.
+/* 3-2 modify */
+	thread_current ()->saved_rsp = f->rsp;
+
 	switch (f->R.rax)
 	{
 	case SYS_HALT:
 		halt();
 		break;
 	case SYS_EXIT:
-		exit(f->R.rdi);
+		f->R.rax = exit(f->R.rdi);
 		break;
 	case SYS_FORK:
+		check_address (f->R.rdi);
 		f->R.rax = fork(f->R.rdi, f);
 		break;
 	case SYS_EXEC:
 		if (exec(f->R.rdi) == -1)
 			exit(-1);
+		// f->R.rax = exec (f->R.rdi);
 		break;
 	case SYS_WAIT:
 		f->R.rax = process_wait(f->R.rdi);
@@ -107,9 +115,13 @@ syscall_handler (struct intr_frame *f UNUSED) {
 		f->R.rax = filesize(f->R.rdi);
 		break;
 	case SYS_READ:
+		/* 3-2 modify */
+		// check_valid_buffer (f->R.rsi, f->R.rdx, f->rsp, 1);
 		f->R.rax = read(f->R.rdi, f->R.rsi, f->R.rdx);
 		break;
 	case SYS_WRITE:
+		/* 3-2 modify */
+		// check_valid_buffer (f->R.rsi, f->R.rdx, f->rsp, 0);
 		f->R.rax = write(f->R.rdi, f->R.rsi, f->R.rdx);
 		break;
 	case SYS_SEEK:
@@ -130,11 +142,34 @@ syscall_handler (struct intr_frame *f UNUSED) {
 	}
 }
 
-void check_address(const uint64_t *uaddr)
+/* 3-2 ADD */
+void *check_address(const uint64_t *uaddr)
 {
 	struct thread *curr = thread_current ();
+	// printf("\n\n %s  hi\n\n", uaddr);
 	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4_get_page(curr->pml4, uaddr) == NULL)
 		exit(-1);
+	struct page *p = spt_find_page (&curr->spt, uaddr);
+	if (p == NULL)
+		exit (-1);
+}
+
+void check_valid_buffer (void *buffer, unsigned size, void *rsp, bool to_write)
+{
+	/* Buffer를 사용하는 read()의 경우 buffer의 주소가 유효한지 아닌지 검사해야 함.
+	 * to_write 변수를 통해 writable을 검사	*/
+	for (int i = 0; i < size; i++) {
+		struct page *temp_page = check_address (buffer + i);
+		if (temp_page == NULL)
+			exit (-1);
+		if (to_write == true && temp_page->writable == false)
+			exit (-1);
+	}
+}
+static void
+check_writable_addr(void* ptr){
+	struct page *page = spt_find_page (&thread_current() -> spt, ptr);
+	if (page == NULL || !page->writable) exit(-1);
 }
 
 /* PintOS를 종료한다. */
@@ -144,13 +179,14 @@ void halt(void)
 }
 
 /* current thread를 종료한다. exit_status를 기록하고 No return으로 종료한다. */
-void exit(int status)
+int exit(int status)
 {
 	struct thread *curr = thread_current ();
 	curr->exit_status = status;
 
-	printf("%s: exit(%d)\n", thread_name (), status);
+	printf("%s: exit(%d)\n", thread_name (), curr->exit_status);
 	thread_exit ();
+	return status;
 }
 
 bool create(const char *file, unsigned initial_size)
@@ -173,15 +209,15 @@ int wait (tid_t tid)
 int exec(const char *file_name)
 {
 	struct thread *curr = thread_current ();
-	check_address(file_name);
+	check_address((void *) file_name);
 
 	// process_exec -> process_cleanup 으로 인해 f->R.rdi 날아감.  때문에 복사 후 다시 넣어줌
 	int size = strlen(file_name) + 1;
 	char *fn_copy = palloc_get_page(PAL_ZERO);
 
 	if (fn_copy == NULL)
-		exit(-1);
-	strlcpy(fn_copy, file_name, size);	
+		return TID_ERROR;
+	strlcpy(fn_copy, file_name, PGSIZE);	
 
 	if (process_exec (fn_copy) == -1)
 		return -1;
@@ -193,8 +229,11 @@ int exec(const char *file_name)
 int open (const char *file)
 {
 	// file이 존재하는지 항상 체크
+
 	check_address(file);
+	lock_acquire (&filesys_lock);
 	struct file *file_obj = filesys_open(file);
+	lock_release (&filesys_lock);
 
 	if (file_obj == NULL)
 		return -1;
@@ -218,11 +257,9 @@ int filesize (int fd)
 
 int read (int fd, void *buffer, unsigned size)
 {
-	check_address(buffer);  /* page fault를 피하기 위해 */
 	int ret;
 	struct thread *curr = thread_current ();
 
-	
 	struct file *file_obj = process_get_file(fd);
 	if (file_obj == NULL)
 		return -1;
@@ -240,17 +277,21 @@ int read (int fd, void *buffer, unsigned size)
 			if (c == '\0')
 				break;
 		}
-		return i;
+		ret = i;
 	}
 
-	if (file_obj == 2) {
-		return -1;
+	else if (file_obj == 2) {
+		ret = -1;
 	}
 	
-	lock_acquire (&filesys_lock);
-	ret = file_read(file_obj, buffer, size);
-	lock_release (&filesys_lock);
-	
+	else {
+		check_address(buffer);  /* page fault를 피하기 위해 */
+		check_writable_addr (buffer);
+		
+		lock_acquire (&filesys_lock);
+		ret = file_read(file_obj, buffer, size);
+		lock_release (&filesys_lock);
+	}
 	return ret;
 }
 
@@ -258,12 +299,16 @@ int read (int fd, void *buffer, unsigned size)
 int write (int fd, const void *buffer, unsigned size)
 {
 	check_address(buffer);  /* page fault를 피하기 위해 */
+
 	int ret;
 	struct thread *curr = thread_current ();
 
 	struct file *file_obj = process_get_file(fd);
 	if (file_obj == NULL)
 		return -1;
+	/* 3-3 stack growth에서 bad pointer 처리를 위해 추가해봄. */
+	if (size == 0)
+		return 0;
 
 	if (file_obj == 2) {
 		if (curr->stdout_count == 0) {
@@ -271,19 +316,20 @@ int write (int fd, const void *buffer, unsigned size)
 			process_close_file(fd);
 			return -1;
 		}
-
 		putbuf(buffer, size);
-		return size;
+		ret = size;
 	}
 
-	if (file_obj == 1) {
-		return -1;
+	else if (file_obj == 1) {
+		ret = -1;
 	}
+
+	else {
 	
 	lock_acquire (&filesys_lock);
 	ret = file_write(file_obj, buffer, size);
 	lock_release (&filesys_lock);
-	
+	}
 	return ret;
 }
 

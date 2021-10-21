@@ -132,6 +132,7 @@ struct thread
 	/* Shared between thread.c and synch.c. */
 	struct list_elem elem; // used to put thread into 'ready_list' or sync blocked_list
 
+	/* 3-1 memory management */
 	
 
 
@@ -142,6 +143,8 @@ struct thread
 #ifdef VM
 	/* Table for whole virtual memory owned by thread. */
 	struct supplemental_page_table spt;
+
+	uintptr_t saved_rsp;
 #endif
 
 	/* Owned by thread.c. */

@@ -17,6 +17,7 @@
 #include "threads/thread.h"
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
+#include "threads/malloc.h"
 #include "intrinsic.h"
 #ifdef VM
 #include "vm/vm.h"
@@ -267,7 +268,7 @@ process_exec (void *f_name) {
 
 	/* We first kill the current conxtext */
 	process_cleanup ();
-	
+	supplemental_page_table_init (&thread_current ()->spt);
 	/* And then load the binary */
 	success = load (file_name, &_if);
 	palloc_free_page (file_name);
@@ -315,7 +316,7 @@ process_wait (tid_t child_tid UNUSED) {
 /* Exit the process. This function is called by thread_exit (). */
 void
 process_exit (void) {
-	struct thread *cur = thread_current ();
+	struct thread *curr = thread_current ();
 	/* TODO: Your code goes here.
 	 * TODO: Implement process termination message (see
 	 * TODO: project2/process_termination.html).
@@ -326,16 +327,21 @@ process_exit (void) {
 		close(i);
 	}
 	/* fdtable 할당해준거 free 해줌*/
-	palloc_free_multiple(cur->fdTable, FDT_PAGES);
+	palloc_free_multiple(curr->fdTable, FDT_PAGES);
 
-	/* file deny 부분 cur->running에는 실행중이 file의 주소가 저장되있음       */
+	/* file deny 부분 curr->running에는 실행중이 file의 주소가 저장되있음       */
 	/* 때문에 더이상 다른 process(kernel)가 접근 할수있도록 allow해줘야됨*/
-	file_close(cur->running);
+	file_close(curr->running);
 
+	// if (curr->pml4 != NULL) {
+	// 	process_cleanup ();
+	// 	printf("%s: exit(%d)\n", thread_name (), curr->exit_status);
+
+	// }
 	process_cleanup ();
 
-	sema_up(&cur->wait_sema);
-	sema_down(&cur->free_sema);
+	sema_up(&curr->wait_sema);
+	sema_down(&curr->free_sema);
 	
 }
 
@@ -715,6 +721,24 @@ lazy_load_segment (struct page *page, void *aux) {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	struct load_info *li = (struct load_info *) aux;
+	if (page == NULL)
+		return false;
+	ASSERT(li->page_read_bytes <= PGSIZE);
+	ASSERT(li->page_zero_bytes <= PGSIZE);
+
+	if (li->page_read_bytes > 0) {
+		file_seek(li->file, li->ofs);
+		if (file_read (li->file, page->va, li->page_read_bytes) != (off_t) li->page_read_bytes) {
+			vm_dealloc_page (page);
+			free (li);
+			return false;
+		}
+	}
+	memset (page->va + li->page_read_bytes, 0, li->page_zero_bytes);
+	file_close (li->file);
+	free (li);
+	return true;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -738,6 +762,7 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 	ASSERT (pg_ofs (upage) == 0);
 	ASSERT (ofs % PGSIZE == 0);
 
+	off_t read_ofs = ofs;
 	while (read_bytes > 0 || zero_bytes > 0) {
 		/* Do calculate how to fill this page.
 		 * We will read PAGE_READ_BYTES bytes from FILE
@@ -746,15 +771,22 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
-		void *aux = NULL;
+		struct load_info *aux = malloc(sizeof (struct load_info));
+		aux->file = file_reopen (file);  // WHY!! 왜 reopen 일까
+		aux->ofs = read_ofs;
+		aux->page_read_bytes = page_read_bytes;
+		aux->page_zero_bytes = page_zero_bytes;
 		if (!vm_alloc_page_with_initializer (VM_ANON, upage,
-					writable, lazy_load_segment, aux))
+					writable, lazy_load_segment, (void *) aux)) {
+			free (aux);
 			return false;
+		}
 
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		read_ofs += page_read_bytes;  // WHY!! 한양대 ppt와 코드가 다르다.
 	}
 	return true;
 }
@@ -762,7 +794,6 @@ load_segment (struct file *file, off_t ofs, uint8_t *upage,
 /* Create a PAGE of stack at the USER_STACK. Return true on success. */
 static bool
 setup_stack (struct intr_frame *if_) {
-	bool success = false;
 	void *stack_bottom = (void *) (((uint8_t *) USER_STACK) - PGSIZE);
 
 	/* TODO: Map the stack on stack_bottom and claim the page immediately.
@@ -770,7 +801,14 @@ setup_stack (struct intr_frame *if_) {
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
 
-	return success;
+	if (!vm_alloc_page (VM_ANON | VM_MARKER_0, stack_bottom, true))
+		return false;
+	if (!vm_claim_page (stack_bottom))
+		return false;
+	memset (stack_bottom, 0, PGSIZE);
+	if_->rsp = USER_STACK;
+
+	return true;
 }
 #endif /* VM */
 
@@ -817,7 +855,7 @@ void argument_stack(char **argv, int argc, struct intr_frame *if_)
 
 	/* Debugging */	
 	//printf ("Hey! This is your stack!\n\n\n\n\n\n\n\n");
-	//hex_dump(if_->rsp, rsp, USER_STACK-if_->rsp, true);
+	// hex_dump(if_->rsp, rsp, USER_STACK-if_->rsp, true);
 
 }
 

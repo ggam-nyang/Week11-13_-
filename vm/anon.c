@@ -29,8 +29,13 @@ bool
 anon_initializer (struct page *page, enum vm_type type, void *kva) {
 	/* Set up the handler */
 	page->operations = &anon_ops;
-
+	// if (type & VM_MARKER_0)
+	// 	page->operations = &anon_stack_ops;
+	
 	struct anon_page *anon_page = &page->anon;
+	anon_page->owner = thread_current ();
+	// anon_page->swap_slot_idx = s
+	return true;
 }
 
 /* Swap in the page by read contents from the swap disk. */
@@ -49,4 +54,13 @@ anon_swap_out (struct page *page) {
 static void
 anon_destroy (struct page *page) {
 	struct anon_page *anon_page = &page->anon;
+	/* WHY!! 의미를 잘 모르겠음 */
+	if (page->frame != NULL) {
+		list_remove (&page->frame->elem);
+		free(page->frame);
+	}
+
+	else {
+		/* swap이 된 경우인데, 아직은 고려하지 않는다. */
+	}
 }
