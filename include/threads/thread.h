@@ -134,6 +134,10 @@ struct thread
 
 	/* 3-1 memory management */
 	
+#ifdef	FILESYS
+	struct dir* current_dir;
+	struct dir* pdir;
+#endif
 
 
 #ifdef USERPROG

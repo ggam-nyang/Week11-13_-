@@ -13,6 +13,10 @@
 struct list frame_list; // frame list for claim page
 struct lock spt_kill_lock;
 
+struct list_elem *clock_elem;
+struct lock clock_lock;
+
+
 
 
 
@@ -30,6 +34,8 @@ vm_init (void) {
 	/* DO NOT MODIFY UPPER LINES. */
 	/* TODO: Your code goes here. */
 	list_init (&frame_list);
+	clock_elem = NULL;
+	lock_init(&clock_lock);
 }
 
 /* Get the type of the page. This function is useful if you want to know the
@@ -113,18 +119,49 @@ spt_insert_page (struct supplemental_page_table *spt UNUSED,
 
 void
 spt_remove_page (struct supplemental_page_table *spt, struct page *page) {
-	/* 3-2에서 하긴 했지만, 언제 필요한 경우인지? */
+	/* 3-2에서 하긴 했지만, 언제 필요한 경우인지? -> mmap-unmap에서 필요함 */
 	struct hash_elem *e = hash_delete (spt->page_table, &page->hash_elem);
 	if (e != NULL)
 		vm_dealloc_page (page);
 	return ;  // WHY!! return true와의 차이는?
 }
 
+/* 3-5 swap / out, calculate cycle for clock algorithm */
+static struct list_elem *
+list_next_cycle (struct list *lst, struct list_elem *elem) {
+	struct list_elem *now_elem = elem;
+	if (now_elem == list_back (lst))
+		now_elem = list_front (lst);
+	else
+		now_elem = list_next (now_elem);
+	
+	return now_elem;
+}
+
 /* Get the struct frame, that will be evicted. */
 static struct frame *
 vm_get_victim (void) {
 	struct frame *victim = NULL;
-	 /* TODO: The policy for eviction is up to you. */
+	/* 3-5 swap */
+	struct thread *curr = thread_current ();
+
+	lock_acquire (&clock_lock);
+	struct list_elem *victim_elem = clock_elem;
+	if (victim_elem == NULL && !list_empty (&frame_list))
+		victim_elem = list_front (&frame_list);
+	while (victim_elem != NULL)
+	{
+		victim = list_entry (victim_elem, struct frame, elem);
+		if (!pml4_is_accessed (curr->pml4, victim->page->va))
+			break;
+		pml4_set_accessed (curr->pml4, victim->page->va, false);
+
+		victim_elem = list_next_cycle (&frame_list, victim_elem);
+	}
+
+	clock_elem = list_next_cycle (&frame_list, victim_elem);
+	list_remove (victim_elem);
+	lock_release (&clock_lock);
 
 	return victim;
 }
@@ -133,10 +170,19 @@ vm_get_victim (void) {
  * Return NULL on error.*/
 static struct frame *
 vm_evict_frame (void) {
-	struct frame *victim UNUSED = vm_get_victim ();
-	/* TODO: swap out the victim and return the evicted frame. */
+	struct frame *victim = vm_get_victim ();
+	if (victim == NULL)
+		return NULL;
 
-	return NULL;
+	struct page *page = victim->page;
+	bool swap_done = swap_out (page);
+	if (!swap_done)
+		PANIC ("\nSwap is full??? WHAT??\n");
+	
+	victim->page = NULL;
+	memset (victim->kva, 0, PGSIZE);
+
+	return victim;
 }
 
 /* palloc() and get frame. If there is no available page, evict the page
@@ -152,9 +198,9 @@ vm_get_frame (void) {
 
 	// swap 하는 경우
 	if (frame->kva == NULL) {
-		PANIC("******* need to make swap *******");
-	// 	free (frame);
-	// 	frame = vm_evict_frame ();
+		// PANIC("******* need to make swap *******");
+		free (frame);
+		frame = vm_evict_frame ();
 	}
 
 	ASSERT (frame != NULL);
@@ -240,7 +286,10 @@ vm_do_claim_page (struct page *page) {
 	page->frame = frame;
 
 	/* 3-1 memory */
-	list_push_back(&frame_list, &frame->elem);
+	if (clock_elem != NULL)
+		list_insert (clock_elem, &frame->elem);
+	else
+		list_push_back(&frame_list, &frame->elem);
 
 	if (!pml4_set_page (curr->pml4, page->va, frame->kva, page->writable))
 		return false;
@@ -273,14 +322,13 @@ supplemental_page_table_copy (struct supplemental_page_table *dst UNUSED,
 			vm_initializer *init = temp_page->uninit.init;
 			bool writable = temp_page->writable;
 			int type = temp_page->uninit.type;
-			void *aux = temp_page->uninit.aux;
 
 			if (type & VM_ANON) {
 				struct load_info *li = malloc (sizeof (struct load_info));
-				li->file = file_duplicate (((struct load_info *) aux)-> file);
-				li->ofs = ((struct load_info *) aux)-> ofs;
-				li->page_read_bytes = ((struct load_info *) aux)->page_read_bytes;
-				li->page_zero_bytes = ((struct load_info *) aux)->page_zero_bytes;
+				li->file = file_duplicate (((struct load_info *) temp_page->uninit.aux)-> file);
+				li->ofs = ((struct load_info *) temp_page->uninit.aux)-> ofs;
+				li->page_read_bytes = ((struct load_info *) temp_page->uninit.aux)->page_read_bytes;
+				li->page_zero_bytes = ((struct load_info *) temp_page->uninit.aux)->page_zero_bytes;
 				vm_alloc_page_with_initializer (type, temp_page->va, writable, init, (void *) li);
 			}
 

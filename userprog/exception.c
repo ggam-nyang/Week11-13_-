@@ -86,7 +86,7 @@ kill (struct intr_frame *f) {
 			// printf ("%s: dying due to interrupt %#04llx (%s).\n",
 			// 		thread_name (), f->vec_no, intr_name (f->vec_no));
 			// intr_dump_frame (f);
-			//thread_exit ();
+			// thread_exit ();
 			exit(-1);
 
 		case SEL_KCSEG:
@@ -154,7 +154,7 @@ page_fault (struct intr_frame *f) {
 	// WHY!!
 	if (user) {
 		curr->exit_status = -1;
-		f->cs = SEL_UCSEG;
+		// f->cs = SEL_UCSEG;
 	}
 	/* Count page faults. */
 	page_fault_cnt++;

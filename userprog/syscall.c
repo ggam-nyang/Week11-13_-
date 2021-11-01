@@ -16,6 +16,7 @@
 #ifdef VM
 #include "vm/vm.h"
 #endif
+#include "vm/file.h"
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -40,6 +41,9 @@ void close (int fd);
 
 int dup2(int oldfd, int newfd);
 
+/* project 3-4 Memory Mapped Files */
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset);
+void munmap (void *addr);
 
 int process_add_file (struct file *);
 struct file *process_get_file (int);
@@ -81,7 +85,6 @@ void
 syscall_handler (struct intr_frame *f UNUSED) {
 /* 3-2 modify */
 	thread_current ()->saved_rsp = f->rsp;
-
 	switch (f->R.rax)
 	{
 	case SYS_HALT:
@@ -136,6 +139,13 @@ syscall_handler (struct intr_frame *f UNUSED) {
 	case SYS_DUP2:
 		f->R.rax = dup2(f->R.rdi, f->R.rsi);
 		break;
+	/* project 3-4 MMAP add */
+	case SYS_MMAP:
+		f->R.rax = (uint64_t) mmap (f->R.rdi, (size_t)f->R.rsi, f->R.rdx, f->R.r10, f->R.r8);
+		break;
+	case SYS_MUNMAP:
+		munmap (f->R.rdi);
+		break;
 	default:
 		exit(-1);
 		break;
@@ -146,29 +156,34 @@ syscall_handler (struct intr_frame *f UNUSED) {
 void *check_address(const uint64_t *uaddr)
 {
 	struct thread *curr = thread_current ();
+	// if (uaddr == NULL) exit (-1);
+	// if (!is_user_vaddr (uaddr)) exit (-1);
+	// if (pml4_get_page (curr->pml4, uaddr) == NULL) exit (-1);
 	// printf("\n\n %s  hi\n\n", uaddr);
-	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4_get_page(curr->pml4, uaddr) == NULL)
-		exit(-1);
+
+	if (uaddr == NULL || !(is_user_vaddr(uaddr)) || pml4e_walk(curr->pml4, uaddr, 0) == NULL)
+		exit (-1);
 	struct page *p = spt_find_page (&curr->spt, uaddr);
 	if (p == NULL)
 		exit (-1);
 }
 
-void check_valid_buffer (void *buffer, unsigned size, void *rsp, bool to_write)
-{
-	/* Buffer를 사용하는 read()의 경우 buffer의 주소가 유효한지 아닌지 검사해야 함.
-	 * to_write 변수를 통해 writable을 검사	*/
-	for (int i = 0; i < size; i++) {
-		struct page *temp_page = check_address (buffer + i);
-		if (temp_page == NULL)
-			exit (-1);
-		if (to_write == true && temp_page->writable == false)
-			exit (-1);
-	}
-}
+// void check_valid_buffer (void *buffer, unsigned size, void *rsp, bool to_write)
+// {
+// 	/* Buffer를 사용하는 read()의 경우 buffer의 주소가 유효한지 아닌지 검사해야 함.
+// 	 * to_write 변수를 통해 writable을 검사	*/
+// 	for (int i = 0; i < size; i++) {
+// 		struct page *temp_page = check_address (buffer + i);
+// 		if (temp_page == NULL)
+// 			exit (-1);
+// 		if (to_write == true && temp_page->writable == false)
+// 			exit (-1);
+// 	}
+// }
 static void
 check_writable_addr(void* ptr){
 	struct page *page = spt_find_page (&thread_current() -> spt, ptr);
+	// printf("\n\n writable \n\n");
 	if (page == NULL || !page->writable) exit(-1);
 }
 
@@ -184,7 +199,7 @@ int exit(int status)
 	struct thread *curr = thread_current ();
 	curr->exit_status = status;
 
-	printf("%s: exit(%d)\n", thread_name (), curr->exit_status);
+	printf("%s: exit(%d)\n", thread_name (), status);
 	thread_exit ();
 	return status;
 }
@@ -229,7 +244,6 @@ int exec(const char *file_name)
 int open (const char *file)
 {
 	// file이 존재하는지 항상 체크
-
 	check_address(file);
 	lock_acquire (&filesys_lock);
 	struct file *file_obj = filesys_open(file);
@@ -243,6 +257,7 @@ int open (const char *file)
 	if (fd == -1)
 		file_close(file_obj);
 	
+	// printf("\n\n here is OPEN \n\n");
 	return fd;
 }
 
@@ -257,6 +272,8 @@ int filesize (int fd)
 
 int read (int fd, void *buffer, unsigned size)
 {
+	check_address(buffer);  /* page fault를 피하기 위해 */
+	check_writable_addr (buffer);
 	int ret;
 	struct thread *curr = thread_current ();
 
@@ -285,12 +302,11 @@ int read (int fd, void *buffer, unsigned size)
 	}
 	
 	else {
-		check_address(buffer);  /* page fault를 피하기 위해 */
-		check_writable_addr (buffer);
-		
+		// printf("\n\n here is READ %d    %d  \n\n", fd, size);
 		lock_acquire (&filesys_lock);
 		ret = file_read(file_obj, buffer, size);
 		lock_release (&filesys_lock);
+		// printf("\n\n here is READ %d   %s    %d  \n\n", fd, buffer, ret);
 	}
 	return ret;
 }
@@ -299,6 +315,7 @@ int read (int fd, void *buffer, unsigned size)
 int write (int fd, const void *buffer, unsigned size)
 {
 	check_address(buffer);  /* page fault를 피하기 위해 */
+	// check_writable_addr (buffer);
 
 	int ret;
 	struct thread *curr = thread_current ();
@@ -325,7 +342,6 @@ int write (int fd, const void *buffer, unsigned size)
 	}
 
 	else {
-	
 	lock_acquire (&filesys_lock);
 	ret = file_write(file_obj, buffer, size);
 	lock_release (&filesys_lock);
@@ -336,11 +352,14 @@ int write (int fd, const void *buffer, unsigned size)
 void seek (int fd, unsigned position)
 {
 	struct file *file_obj = process_get_file(fd);
-	
-	if (file_obj <= 2)
+	if (file_obj <= 2 || file_obj == NULL)
 		return ;
 
-	file_obj->pos = position;
+	// file_obj->pos = position;
+	lock_acquire (&filesys_lock);
+	file_seek(file_obj, position);
+	lock_release (&filesys_lock);
+	return ;
 }
 
 
@@ -348,8 +367,8 @@ unsigned tell (int fd)
 {
 	struct file *file_obj = process_get_file(fd);
 
-	if (file_obj <= 2)
-		return ;
+	if (file_obj <= 2 || file_obj == NULL)
+		return 0;
 
 	return file_tell(file_obj);
 
@@ -382,7 +401,11 @@ void close (int fd)
 
 tid_t fork (const char *thread_name, struct intr_frame *if_)
 {
+	tid_t temp_tid;
+	// lock_acquire (&filesys_lock);
 	return process_fork (thread_name, if_);
+	// lock_release (&filesys_lock);
+	// return temp_tid;
 }
 
 int dup2 (int oldfd, int newfd)
@@ -413,6 +436,47 @@ int dup2 (int oldfd, int newfd)
 	fdt[newfd] = old_file;	
 	return newfd;
 }
+
+void *mmap (void *addr, size_t length, int writable, int fd, off_t offset)
+{
+	if (addr == 0 || (!is_user_vaddr (addr))) {
+		return NULL;
+	}
+	if ((uint64_t)addr % PGSIZE != 0){  // WHY!!
+		return NULL;
+	}
+	if (offset % PGSIZE != 0)
+		return NULL;
+	if ((uint64_t)addr + length == 0) return NULL;    // WHY!!
+	if (!is_user_vaddr ((uint64_t)addr + length)) return NULL;
+	
+	for (uint64_t temp_addr = (uint64_t) addr; temp_addr < (uint64_t) addr + length; temp_addr += PGSIZE) {
+		if (spt_find_page (&thread_current ()->spt, (void *) temp_addr) != NULL)
+			return NULL;
+	}
+	struct file *file_obj = process_get_file (fd);
+	void *temp_addr;
+	if (file_obj == NULL) return NULL;
+	if (fd == 0 || fd == 1) return NULL;
+	if (length == 0) return NULL;
+	lock_acquire (&filesys_lock);
+	temp_addr = do_mmap(addr, length, writable, file_obj, offset);
+	lock_release (&filesys_lock);
+	return temp_addr;
+	/* mmap, fork에서 lock을 걸어 모든 case에서 동일한 결과 출력 */
+
+}
+
+
+
+void munmap (void *addr)
+{
+	// lock_acquire (&filesys_lock);
+	do_munmap (addr);
+	// lock_release (&filesys_lock);
+}
+
+
 
 
 int process_add_file (struct file *f)
