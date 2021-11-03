@@ -6,6 +6,8 @@
 #include "filesys/filesys.h"
 #include "filesys/free-map.h"
 #include "threads/malloc.h"
+#include "threads/synch.h"
+#include "filesys/fat.h"
 
 /* Identifies an inode. */
 #define INODE_MAGIC 0x494e4f44
@@ -16,8 +18,17 @@ struct inode_disk {
 	disk_sector_t start;                /* First data sector. */
 	off_t length;                       /* File size in bytes. */
 	unsigned magic;                     /* Magic number. */
-	uint32_t unused[125];               /* Not used. */
+	
+	/* 4-2 filesys*/
+	uint32_t is_dir;
+	uint32_t is_link;
+
+	char link_name[492];
+
 };
+
+void
+extend_inode_if_needed (struct inode *inode, off_t pos, off_t size);
 
 /* Returns the number of sectors to allocate for an inode SIZE
  * bytes long. */
@@ -34,7 +45,11 @@ struct inode {
 	bool removed;                       /* True if deleted, false otherwise. */
 	int deny_write_cnt;                 /* 0: writes ok, >0: deny writes. */
 	struct inode_disk data;             /* Inode content. */
+	bool is_dir;
+	struct lock inode_lock;
 };
+
+void extend_inode_if_needed (struct inode *, off_t, off_t);
 
 /* Returns the disk sector that contains byte offset POS within
  * INODE.
@@ -125,6 +140,7 @@ inode_open (disk_sector_t sector) {
 	inode->open_cnt = 1;
 	inode->deny_write_cnt = 0;
 	inode->removed = false;
+	lock_init (&inode->inode_lock);
 	disk_read (filesys_disk, inode->sector, &inode->data);
 	return inode;
 }
@@ -239,8 +255,9 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
 
 	if (inode->deny_write_cnt)
 		return 0;
-
+	lock_acquire (&inode->inode_lock);
 	while (size > 0) {
+		extend_inode_if_needed(inode, offset, size);
 		/* Sector to write, starting byte offset within sector. */
 		disk_sector_t sector_idx = byte_to_sector (inode, offset);
 		int sector_ofs = offset % DISK_SECTOR_SIZE;
@@ -283,6 +300,7 @@ inode_write_at (struct inode *inode, const void *buffer_, off_t size,
 		bytes_written += chunk_size;
 	}
 	free (bounce);
+	lock_release (&inode->inode_lock);
 
 	return bytes_written;
 }
@@ -310,4 +328,41 @@ inode_allow_write (struct inode *inode) {
 off_t
 inode_length (const struct inode *inode) {
 	return inode->data.length;
+}
+
+void
+extend_inode_if_needed (struct inode *inode, off_t pos, off_t size)
+{
+	if (pos + size <= inode->data.length) return;
+
+	// Add more sector only if required
+	int required_sectors = bytes_to_sectors (pos + size);
+	int current_sectors = bytes_to_sectors (inode->data.length);
+	int new_sector_cnt = required_sectors - current_sectors;
+
+	if (new_sector_cnt > 0) {
+		disk_sector_t new_sector = -1;
+		if (fat_allocate (new_sector_cnt, &new_sector)) {
+			// New sector linking
+			if (inode->data.start == 0)
+				inode->data.start = new_sector;
+			else {
+				// Update FAT connection
+				disk_sector_t last_sector = byte_to_sector (inode, inode->data.length - 1);
+				cluster_t last_clst = sector_to_cluster (last_sector);
+				ASSERT (fat_get (last_clst) == EOChain);
+				fat_put (last_clst, sector_to_cluster (new_sector));
+			}
+		}
+		else
+			PANIC("Extend failed!");
+	}
+
+	// Update inode metadata
+	inode->data.length = pos + size;
+	// TODO: Should this exist only for ROOT_DIR which is zero initialized?
+	/*if (inode->data.magic != INODE_MAGIC)
+		inode->data.magic = INODE_MAGIC; */
+
+	disk_write (filesys_disk, inode->sector, &inode->data);
 }

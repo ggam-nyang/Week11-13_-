@@ -17,6 +17,7 @@
 #include "vm/vm.h"
 #endif
 #include "vm/file.h"
+#include "filesys/directory.h"
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -44,6 +45,9 @@ int dup2(int oldfd, int newfd);
 /* project 3-4 Memory Mapped Files */
 void *mmap (void *addr, size_t length, int writable, int fd, off_t offset);
 void munmap (void *addr);
+
+bool is_dir(int fd);
+bool sys_chdir(const char *path_name);
 
 int process_add_file (struct file *);
 struct file *process_get_file (int);
@@ -146,6 +150,24 @@ syscall_handler (struct intr_frame *f UNUSED) {
 	case SYS_MUNMAP:
 		munmap (f->R.rdi);
 		break;
+    case SYS_ISDIR:
+        f->R.rax = is_dir(f->R.rdi);
+        break;
+    case SYS_CHDIR:
+        f->R.rax = sys_chdir(f->R.rdi);
+        break;
+    // case SYS_MKDIR:
+    //     f->R.rax = sys_mkdir(f->R.rdi);
+    //     break;
+    // case SYS_READDIR:
+    //     f->R.rax = sys_readdir(f->R.rdi, f->R.rsi);
+    //     break;
+    // case SYS_INUMBER:
+    //     f->R.rax = sys_inumber(f->R.rdi);
+    //     break;
+    // case SYS_SYMLINK:
+    //     f->R.rax = symlink(f->R.rdi, f->R.rsi);
+    //     break;
 	default:
 		exit(-1);
 		break;
@@ -476,8 +498,77 @@ void munmap (void *addr)
 	// lock_release (&filesys_lock);
 }
 
+/* Start project4 */
+
+bool is_dir(int fd)
+{
+    struct file *target = process_get_file(fd);
+    if (target == NULL)
+        return false;
+
+    return inode_is_dir(file_get_inode(target));
+}
+
+bool sys_chdir(const char *path_name)
+{
+    if (path_name == NULL)
+        return false;
+
+    char *cp_name = (char *)malloc(strlen(path_name) + 1);
+    strlcpy(cp_name, path_name, strlen(path_name) + 1);
+
+    struct dir *chdir = NULL;
+    if (cp_name[0] == '/')
+    {
+        chdir = dir_open_root();
+    }
+    else
+        chdir = dir_reopen(thread_current()->current_dir);
 
 
+    
+    char *token, *nextToken, *savePtr;
+    token = strtok_r(cp_name, "/", &savePtr);
+
+    struct inode *inode = NULL;
+    while (token != NULL)
+    {
+        if (!dir_lookup(chdir, token, &inode))
+        {
+            dir_close(chdir);
+            return false;
+        }
+
+        if (!inode_is_dir(inode))
+        {
+            dir_close(chdir);
+            return false;
+        }
+
+        dir_close(chdir);
+        
+        chdir = dir_open(inode);
+
+        token = strtok_r(NULL, "/", &savePtr);
+
+    }
+    dir_close(thread_current()->current_dir);
+    thread_current()->current_dir = chdir;
+    free(cp_name);
+    return true;
+}
+
+// bool mkdir (const char *dir)
+// {
+// 	lock_acquire (&filesys_lock);
+// 	bool temp = filesys_create_dir(dir); // 이걸 만들어줘야 함...! 
+
+// 	lock_release (&filesys_lock);
+// 	return temp;
+// }
+
+
+/* End of project4 */
 
 int process_add_file (struct file *f)
 {

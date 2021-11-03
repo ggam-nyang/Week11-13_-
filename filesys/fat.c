@@ -150,9 +150,14 @@ fat_boot_create (void) {
 	};
 }
 
+/* 4-1 filesys */
 void
 fat_fs_init (void) {
-	/* TODO: Your code goes here. */
+	fat_fs->fat = NULL;
+	fat_fs->fat_length = fat_fs->bs.fat_sectors * DISK_SECTOR_SIZE / (sizeof (cluster_t) * SECTORS_PER_CLUSTER);
+	fat_fs->data_start = fat_fs->bs.fat_start + fat_fs->bs.fat_sectors;
+	fat_fs->last_clst = fat_fs->bs.total_sectors - 1;
+	lock_init(&fat_fs->write_lock);
 }
 
 /*----------------------------------------------------------------------------*/
@@ -164,30 +169,113 @@ fat_fs_init (void) {
  * Returns 0 if fails to allocate a new cluster. */
 cluster_t
 fat_create_chain (cluster_t clst) {
-	/* TODO: Your code goes here. */
+	cluster_t tester;
+	for (tester = 2; tester < fat_fs->fat_length; tester++)
+	{
+		if (fat_get (tester) == 0)
+			break;
+	}
+
+	if (tester == fat_fs->fat_length)
+		return 0;
+
+	fat_put (tester, EOChain);
+	
+	if (clst == 0)
+		return tester;
+	
+	while (fat_get (clst) != EOChain)
+	{
+		clst = fat_get (clst);
+	}
+
+	fat_put(clst, tester);
+	return tester;
+	
 }
 
 /* Remove the chain of clusters starting from CLST.
  * If PCLST is 0, assume CLST as the start of the chain. */
 void
 fat_remove_chain (cluster_t clst, cluster_t pclst) {
-	/* TODO: Your code goes here. */
+	cluster_t next;
+	while (clst != EOChain)
+	{
+		next = fat_get (clst);
+		fat_put (clst, 0);
+		clst = next;
+	}
+
+	if (pclst != 0)
+		fat_put (pclst, EOChain);
 }
 
 /* Update a value in the FAT table. */
 void
 fat_put (cluster_t clst, cluster_t val) {
-	/* TODO: Your code goes here. */
+	fat_fs->fat[clst] = val;
 }
 
 /* Fetch a value in the FAT table. */
 cluster_t
 fat_get (cluster_t clst) {
-	/* TODO: Your code goes here. */
+	return fat_fs->fat[clst];
 }
 
 /* Covert a cluster # to a sector number. */
 disk_sector_t
 cluster_to_sector (cluster_t clst) {
-	/* TODO: Your code goes here. */
+	return fat_fs->data_start + (clst - 1); // -1 해야할지????
 }
+
+cluster_t
+sector_to_cluster (disk_sector_t sector) {
+	return ((sector - fat_fs->data_start) / fat_fs->bs.sectors_per_cluster) + 1;
+}
+
+/* Get next sector in clusters. */
+disk_sector_t
+next_sector (disk_sector_t sector) {
+	disk_sector_t ofs = sector - fat_fs->data_start;
+	unsigned int spc = fat_fs->bs.sectors_per_cluster;
+	if (ofs % spc == (spc - 1)) {
+		// Last sector in cluster
+		cluster_t this_clst = (ofs / spc) + 1;
+		cluster_t next_clst = fat_get (this_clst);
+		if (next_clst == EOChain)
+			return -1;
+		else
+			return cluster_to_sector (next_clst);
+	}
+	else {
+		return (sector + 1);
+	}
+}
+
+/* Helper function around fat_create_chain similar to free_map_allocate */
+bool
+fat_allocate (size_t cnt, disk_sector_t *sectorp) {
+	if (cnt == 0) return true;
+	ASSERT (cnt > 0);
+
+	cluster_t start = fat_create_chain (0);
+	cnt--;
+
+	cluster_t prev = start;
+	while (prev != 0 && cnt > 0) {
+		prev = fat_create_chain (prev);
+		cnt--;
+	}
+
+	if (cnt != 0) {
+		// Fail to allocate count sectors, recover.w
+		fat_remove_chain (start, 0);
+		start = 0;
+	}
+	else {
+		// Successful allocation
+		*sectorp = cluster_to_sector (start);
+	}
+	return (start != 0);
+}
+
